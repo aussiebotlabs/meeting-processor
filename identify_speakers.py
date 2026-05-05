@@ -4,12 +4,19 @@ import json
 import os
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from dotenv import load_dotenv
 from openai import OpenAI
 
 load_dotenv()
+
+@dataclass
+class PromptResult:
+    action: Literal["accept", "override", "skip", "followup"]
+    value: str | None = None
 
 SYSTEM_PROMPT_HEADER = """\
 You are helping identify the real names of speakers in a meeting transcript.
@@ -72,10 +79,9 @@ def _colour(text: str, colour: str) -> str:
     return f"{colour}{text}{RESET}"
 
 
-def prompt_user(speaker: str, guess: dict) -> str | None:
+def prompt_user(speaker: str, guess: dict) -> PromptResult:
     """
-    Present the model's guess to the user and return the confirmed name.
-    Returns None if the user skips this speaker.
+    Present the model's guess to the user and return the user's action.
     """
     conf_colour = CONFIDENCE_COLOURS.get(guess["confidence"], "")
     conf_label = _colour(guess["confidence"].upper(), conf_colour)
@@ -103,12 +109,16 @@ def prompt_user(speaker: str, guess: dict) -> str | None:
     while True:
         raw = input("  > ").strip()
         if raw == "":
-            return guess["name"]
+            if guess["name"]:
+                return PromptResult("accept", guess["name"])
+            return PromptResult("skip")
         if raw.lower() == "s":
-            return None
+            return PromptResult("skip")
         if raw == "?":
-            return None  # handled by caller
-        return raw
+            return PromptResult("followup")
+        if raw.startswith("?"):
+            return PromptResult("followup", raw[1:].strip())
+        return PromptResult("override", raw)
 
 
 def ask_followup(speaker: str, question: str, messages: list[dict], client: OpenAI) -> str:
@@ -160,26 +170,35 @@ def identify_speakers(
         guess = parse_guess(raw_content)
 
         # Interactive loop — allow follow-up questions
+        confirmed_name = None
         while True:
-            confirmed = prompt_user(speaker, guess)
+            result = prompt_user(speaker, guess)
 
-            if confirmed == "?":
-                question = input("  Your question: ").strip()
+            if result.action == "followup":
+                question = result.value
+                if not question:
+                    question = input("  Your question: ").strip()
+                
                 if question:
                     answer = ask_followup(speaker, question, messages, client)
                     print(f"\n  {answer}\n")
                 continue
+            
+            if result.action == "skip":
+                confirmed_name = None
+            else:
+                confirmed_name = result.value
             break
 
-        if confirmed is not None:
-            name_map[speaker] = confirmed
+        if confirmed_name is not None:
+            name_map[speaker] = confirmed_name
             messages.append({
                 "role": "user",
-                "content": f"Confirmed: {speaker} is '{confirmed}'. Remember this for the rest.",
+                "content": f"Confirmed: {speaker} is '{confirmed_name}'. Remember this for the rest.",
             })
             messages.append({
                 "role": "assistant",
-                "content": f"Understood. {speaker} = '{confirmed}'.",
+                "content": f"Understood. {speaker} = '{confirmed_name}'.",
             })
         else:
             messages.append({

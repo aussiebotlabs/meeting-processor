@@ -261,3 +261,59 @@ def test_identify_speakers_skip_leaves_speaker_out(tmp_path: Path):
     assert "Speaker 2" not in result
     assert result["Speaker 0"] == "Alice"
     assert result["Speaker 3"] == "Jake"
+
+
+def test_identify_speakers_bare_followup(tmp_path: Path):
+    """Bare '?' triggers a follow-up question, then returns to the same speaker."""
+    from identify_speakers import identify_speakers
+
+    transcript_file = tmp_path / "meeting.txt"
+    transcript_file.write_text(SAMPLE_TRANSCRIPT, encoding="utf-8")
+
+    mock_client = MagicMock()
+    # 1. Initial guess for Speaker 0
+    # 2. Follow-up answer
+    # 3. Initial guess for Speaker 1 (after Speaker 0 is confirmed)
+    # ...
+    mock_client.chat.completions.create.side_effect = [
+        _make_mock_completion("Alice"),
+        MagicMock(choices=[MagicMock(message=MagicMock(content="She is the CEO."))]),
+        _make_mock_completion("Marcel"),
+        _make_mock_completion("Sarah"),
+        _make_mock_completion("Jake"),
+    ]
+
+    # Speaker 0: '?' then 'What is her role?', then Enter to accept "Alice"
+    # Rest: Enter
+    with patch("builtins.input", side_effect=["?", "What is her role?", "", "", "", ""]):
+        result = identify_speakers(transcript_file, mock_client)
+
+    assert result["Speaker 0"] == "Alice"
+    assert result["Speaker 1"] == "Marcel"
+
+
+def test_identify_speakers_inline_followup(tmp_path: Path):
+    """'?question' triggers a follow-up immediately, then returns to the same speaker."""
+    from identify_speakers import identify_speakers
+
+    transcript_file = tmp_path / "meeting.txt"
+    transcript_file.write_text(SAMPLE_TRANSCRIPT, encoding="utf-8")
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.side_effect = [
+        _make_mock_completion("Alice"),
+        MagicMock(choices=[MagicMock(message=MagicMock(content="She is the CEO."))]),
+        _make_mock_completion("Marcel"),
+        _make_mock_completion("Sarah"),
+        _make_mock_completion("Jake"),
+    ]
+
+    # Speaker 0: '?What is her role?', then Enter to accept "Alice"
+    # Rest: Enter
+    with patch("builtins.input", side_effect=["?What is her role?", "", "", "", ""]):
+        result = identify_speakers(transcript_file, mock_client)
+
+    assert result["Speaker 0"] == "Alice"
+    assert result["Speaker 1"] == "Marcel"
+    # Regression check: the question itself didn't become the name
+    assert result["Speaker 0"] != "?What is her role?"
