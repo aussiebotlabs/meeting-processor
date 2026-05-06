@@ -1,12 +1,12 @@
 """Transcribe an audio file using Deepgram with speaker diarization."""
 
+import os
 import sys
 from pathlib import Path
 
 from deepgram import DeepgramClient
 from deepgram.core.request_options import RequestOptions
 from dotenv import load_dotenv
-import os
 
 load_dotenv()
 
@@ -64,15 +64,16 @@ def transcribe(audio_path: Path) -> None:
     for utterance in utterances:
         speaker = utterance.speaker
         transcript = utterance.transcript or ""
-        start = utterance.start or 0.0
-        end = utterance.end or 0.0
+        # start = utterance.start or 0.0
+        # end = utterance.end or 0.0
 
         if speaker != current_speaker:
             current_speaker = speaker
             label = f"Speaker {speaker}" if speaker is not None else "Unknown"
             output_lines.append(f"\n[{label}]")
 
-        output_lines.append(f"  [{format_timestamp(start)} → {format_timestamp(end)}] {transcript}")
+        # output_lines.append(f"  [{format_timestamp(start)} → {format_timestamp(end)}] {transcript}")
+        output_lines.append(f"  {transcript}")
 
     print("\n".join(output_lines))
 
@@ -88,7 +89,9 @@ def main() -> None:
     else:
         # Auto-detect: find the most recently modified .m4a in the project dir
         project_dir = Path(__file__).parent
-        m4a_files = sorted(project_dir.glob("*.m4a"), key=lambda p: p.stat().st_mtime, reverse=True)
+        m4a_files = sorted(
+            project_dir.glob("*.m4a"), key=lambda p: p.stat().st_mtime, reverse=True
+        )
         if not m4a_files:
             print("No .m4a files found in the project directory.", file=sys.stderr)
             print("Usage: uv run transcribe.py [audio_file.m4a]", file=sys.stderr)
