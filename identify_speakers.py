@@ -18,11 +18,13 @@ class PromptResult:
     action: Literal["accept", "override", "skip", "followup"]
     value: str | None = None
 
-SYSTEM_PROMPT_HEADER = """\
+# Stable role description sent with every request (not task-specific).
+# Task-specific instructions are added dynamically per call.
+IDENTITY_SYSTEM_PROMPT = """\
 You are helping identify the real names of speakers in a meeting transcript.
 Speakers are labeled [Speaker 0], [Speaker 1], etc.
 
-When asked about a speaker, respond ONLY with a JSON object with these fields:
+Reply ONLY with a JSON object with these fields:
   "name"           - your best guess at the real name, or null if unknown
   "confidence"     - "low", "medium", or "high"
   "evidence_quote" - a short verbatim quote from the transcript supporting your guess
@@ -30,8 +32,12 @@ When asked about a speaker, respond ONLY with a JSON object with these fields:
 
 If you have already been told the name of another speaker, use that context to help
 identify remaining speakers (e.g. someone might address another speaker by name).
+"""
 
-TRANSCRIPT:
+FOLLOWUP_SYSTEM_PROMPT = """\
+You are helping a user understand a meeting transcript.
+Speakers are labeled [Speaker 0], [Speaker 1], etc.
+Answer the question in concise plain English. Do NOT use JSON format.
 """
 
 CONFIDENCE_COLOURS = {
@@ -75,14 +81,38 @@ def parse_guess(content: str) -> dict:
         return {"name": None, "confidence": "low", "evidence_quote": "", "reasoning": ""}
 
 
+def format_followup_answer(answer: str) -> str:
+    """Render a follow-up answer as readable prose.
+
+    If the model accidentally returns JSON (because it was primed by prior
+    identity guesses), extract the most informative fields and return them as
+    plain text rather than printing raw braces and keys.
+    """
+    stripped = answer.strip()
+    try:
+        data = json.loads(stripped)
+        if isinstance(data, dict):
+            parts: list[str] = []
+            if data.get("reasoning"):
+                parts.append(data["reasoning"])
+            if data.get("evidence_quote"):
+                parts.append(f'Evidence: "{data["evidence_quote"]}"')
+            if data.get("name"):
+                confidence = data.get("confidence", "")
+                label = f"{data['name']} ({confidence} confidence)" if confidence else data["name"]
+                parts.append(f"Best guess: {label}")
+            return "\n  ".join(parts) if parts else stripped
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return stripped
+
+
 def _colour(text: str, colour: str) -> str:
     return f"{colour}{text}{RESET}"
 
 
 def prompt_user(speaker: str, guess: dict) -> PromptResult:
-    """
-    Present the model's guess to the user and return the user's action.
-    """
+    """Present the model's guess to the user and return the user's action."""
     conf_colour = CONFIDENCE_COLOURS.get(guess["confidence"], "")
     conf_label = _colour(guess["confidence"].upper(), conf_colour)
 
@@ -121,16 +151,56 @@ def prompt_user(speaker: str, guess: dict) -> PromptResult:
         return PromptResult("override", raw)
 
 
-def ask_followup(speaker: str, question: str, messages: list[dict], client: OpenAI) -> str:
-    """Send a free-form follow-up question about a speaker and print the response."""
-    messages.append({"role": "user", "content": f"[Follow-up about {speaker}]: {question}"})
+def ask_identity(
+    speaker: str,
+    transcript_message: dict,
+    history: list[dict],
+    client: OpenAI,
+) -> dict:
+    """Ask the model to identify a speaker, returning a parsed guess dict.
+
+    The transcript message is always first (cached prefix), followed by
+    confirmed-name history, then the task-specific system prompt and question.
+    """
+    messages = [
+        transcript_message,
+        *history,
+        {"role": "system", "content": IDENTITY_SYSTEM_PROMPT},
+        {"role": "user", "content": f"Who is {speaker}?"},
+    ]
+    resp = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=messages,
+        response_format={"type": "json_object"},
+    )
+    return parse_guess(resp.choices[0].message.content or "{}")
+
+
+def ask_followup(
+    speaker: str,
+    question: str,
+    transcript_message: dict,
+    history: list[dict],
+    client: OpenAI,
+) -> str:
+    """Send a free-form follow-up question about a speaker, returning plain-text prose.
+
+    Uses a separate system prompt that explicitly forbids JSON, so the model
+    answers conversationally. Any accidentally-JSON response is reformatted by
+    format_followup_answer before it reaches the user.
+    """
+    messages = [
+        transcript_message,
+        *history,
+        {"role": "system", "content": FOLLOWUP_SYSTEM_PROMPT},
+        {"role": "user", "content": f"[Follow-up about {speaker}]: {question}"},
+    ]
     resp = client.chat.completions.create(
         model="gpt-4.1-mini",
         messages=messages,
     )
-    answer = resp.choices[0].message.content or ""
-    messages.append({"role": "assistant", "content": answer})
-    return answer
+    raw = resp.choices[0].message.content or ""
+    return format_followup_answer(raw)
 
 
 def identify_speakers(
@@ -151,25 +221,17 @@ def identify_speakers(
     print(f"\nFound {len(speakers)} speakers: {', '.join(speakers)}")
     print("Loading transcript into model context (this may take a moment)…")
 
-    system_content = SYSTEM_PROMPT_HEADER + transcript
-    messages: list[dict] = [{"role": "system", "content": system_content}]
+    # Stable prefix sent first in every request — long transcripts are cached here.
+    transcript_message: dict = {"role": "user", "content": f"TRANSCRIPT:\n{transcript}"}
+    # Growing list of confirmation/skip messages accumulated across speakers.
+    history: list[dict] = []
 
     name_map: dict[str, str] = {}
 
     for speaker in speakers:
-        # Ask the model for a guess
-        messages.append({"role": "user", "content": f"Who is {speaker}? Reply as JSON."})
-        resp = client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=messages,
-            response_format={"type": "json_object"},
-        )
-        raw_content = resp.choices[0].message.content or "{}"
-        messages.append({"role": "assistant", "content": raw_content})
+        guess = ask_identity(speaker, transcript_message, history, client)
 
-        guess = parse_guess(raw_content)
-
-        # Interactive loop — allow follow-up questions
+        # Interactive loop — allow follow-up questions before confirming
         confirmed_name = None
         while True:
             result = prompt_user(speaker, guess)
@@ -178,12 +240,12 @@ def identify_speakers(
                 question = result.value
                 if not question:
                     question = input("  Your question: ").strip()
-                
+
                 if question:
-                    answer = ask_followup(speaker, question, messages, client)
+                    answer = ask_followup(speaker, question, transcript_message, history, client)
                     print(f"\n  {answer}\n")
                 continue
-            
+
             if result.action == "skip":
                 confirmed_name = None
             else:
@@ -192,20 +254,20 @@ def identify_speakers(
 
         if confirmed_name is not None:
             name_map[speaker] = confirmed_name
-            messages.append({
+            history.append({
                 "role": "user",
                 "content": f"Confirmed: {speaker} is '{confirmed_name}'. Remember this for the rest.",
             })
-            messages.append({
+            history.append({
                 "role": "assistant",
                 "content": f"Understood. {speaker} = '{confirmed_name}'.",
             })
         else:
-            messages.append({
+            history.append({
                 "role": "user",
                 "content": f"Skipped: {speaker} name is unknown for now.",
             })
-            messages.append({
+            history.append({
                 "role": "assistant",
                 "content": f"Understood. {speaker} name remains unconfirmed.",
             })

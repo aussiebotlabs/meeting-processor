@@ -7,8 +7,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from identify_speakers import (
+    FOLLOWUP_SYSTEM_PROMPT,
+    IDENTITY_SYSTEM_PROMPT,
     apply_name_map,
+    ask_followup,
+    ask_identity,
     discover_speakers,
+    format_followup_answer,
     parse_guess,
     write_named_transcript,
 )
@@ -317,3 +322,182 @@ def test_identify_speakers_inline_followup(tmp_path: Path):
     assert result["Speaker 1"] == "Marcel"
     # Regression check: the question itself didn't become the name
     assert result["Speaker 0"] != "?What is her role?"
+
+
+# --- format_followup_answer ---
+
+def test_format_followup_answer_plain_text_passes_through():
+    answer = "Speaker 0 is mostly discussing marketing strategies."
+    assert format_followup_answer(answer) == answer
+
+
+def test_format_followup_answer_empty_string():
+    assert format_followup_answer("") == ""
+
+
+def test_format_followup_answer_json_returns_reasoning():
+    payload = json.dumps({
+        "name": "Joe",
+        "confidence": "high",
+        "evidence_quote": "I just thought it could actually be a marketing tool.",
+        "reasoning": "Speaker 0 discusses using AI tools for marketing funnels.",
+    })
+    result = format_followup_answer(payload)
+    assert "marketing" in result.lower()
+    assert "{" not in result
+    assert '"name"' not in result
+    assert '"confidence"' not in result
+
+
+def test_format_followup_answer_json_includes_evidence_quote():
+    payload = json.dumps({
+        "name": None,
+        "confidence": "low",
+        "evidence_quote": "They talk about lead generation.",
+        "reasoning": "Context suggests a business role.",
+    })
+    result = format_followup_answer(payload)
+    assert "lead generation" in result
+    assert "{" not in result
+
+
+def test_format_followup_answer_json_name_only():
+    payload = json.dumps({"name": "Alice", "confidence": "medium"})
+    result = format_followup_answer(payload)
+    assert "Alice" in result
+    assert "{" not in result
+
+
+def test_format_followup_answer_non_dict_json_passes_through():
+    payload = json.dumps(["a", "b"])
+    assert format_followup_answer(payload) == payload
+
+
+# --- ask_identity message structure ---
+
+def _make_transcript_message(transcript: str) -> dict:
+    return {"role": "user", "content": f"TRANSCRIPT:\n{transcript}"}
+
+
+def test_ask_identity_transcript_is_first_message():
+    """The stable transcript user message is always first in the call."""
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _make_mock_completion("Alice")
+
+    transcript_msg = _make_transcript_message(SAMPLE_TRANSCRIPT)
+    ask_identity("Speaker 0", transcript_msg, [], mock_client)
+
+    call_messages = mock_client.chat.completions.create.call_args[1]["messages"]
+    assert call_messages[0] == transcript_msg
+
+
+def test_ask_identity_uses_json_response_format():
+    """Identity calls must request json_object format."""
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _make_mock_completion("Alice")
+
+    transcript_msg = _make_transcript_message(SAMPLE_TRANSCRIPT)
+    ask_identity("Speaker 0", transcript_msg, [], mock_client)
+
+    kwargs = mock_client.chat.completions.create.call_args[1]
+    assert kwargs.get("response_format") == {"type": "json_object"}
+
+
+def test_ask_identity_history_appears_after_transcript():
+    """Confirmed-name history messages come after the transcript but before the question."""
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _make_mock_completion("Marcel")
+
+    history = [
+        {"role": "user", "content": "Confirmed: Speaker 0 is 'Alice'."},
+        {"role": "assistant", "content": "Understood. Speaker 0 = 'Alice'."},
+    ]
+    transcript_msg = _make_transcript_message(SAMPLE_TRANSCRIPT)
+    ask_identity("Speaker 1", transcript_msg, history, mock_client)
+
+    call_messages = mock_client.chat.completions.create.call_args[1]["messages"]
+    assert call_messages[0] == transcript_msg
+    assert call_messages[1] == history[0]
+    assert call_messages[2] == history[1]
+
+
+# --- ask_followup message structure and output ---
+
+def test_ask_followup_transcript_is_first_message():
+    """The transcript user message is always first in a follow-up call."""
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = MagicMock(
+        choices=[MagicMock(message=MagicMock(content="She runs marketing."))]
+    )
+
+    transcript_msg = _make_transcript_message(SAMPLE_TRANSCRIPT)
+    ask_followup("Speaker 0", "What does she do?", transcript_msg, [], mock_client)
+
+    call_messages = mock_client.chat.completions.create.call_args[1]["messages"]
+    assert call_messages[0] == transcript_msg
+
+
+def test_ask_followup_uses_followup_system_prompt():
+    """Follow-up calls use the plain-English system prompt, not the JSON one."""
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = MagicMock(
+        choices=[MagicMock(message=MagicMock(content="She runs marketing."))]
+    )
+
+    transcript_msg = _make_transcript_message(SAMPLE_TRANSCRIPT)
+    ask_followup("Speaker 0", "What does she do?", transcript_msg, [], mock_client)
+
+    call_messages = mock_client.chat.completions.create.call_args[1]["messages"]
+    system_messages = [m for m in call_messages if m["role"] == "system"]
+    assert len(system_messages) == 1
+    assert system_messages[0]["content"] == FOLLOWUP_SYSTEM_PROMPT
+
+
+def test_ask_followup_does_not_request_json_format():
+    """Follow-up calls must NOT force json_object response format."""
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = MagicMock(
+        choices=[MagicMock(message=MagicMock(content="She runs marketing."))]
+    )
+
+    transcript_msg = _make_transcript_message(SAMPLE_TRANSCRIPT)
+    ask_followup("Speaker 0", "What does she do?", transcript_msg, [], mock_client)
+
+    kwargs = mock_client.chat.completions.create.call_args[1]
+    assert "response_format" not in kwargs
+
+
+def test_ask_followup_json_response_displayed_as_prose():
+    """If the model returns JSON during a follow-up, output is readable prose."""
+    json_answer = json.dumps({
+        "name": "Joe",
+        "confidence": "high",
+        "evidence_quote": "I just thought it could actually be a marketing tool.",
+        "reasoning": "Speaker 0 discusses using AI-powered tools for marketing funnels.",
+    })
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = MagicMock(
+        choices=[MagicMock(message=MagicMock(content=json_answer))]
+    )
+
+    transcript_msg = _make_transcript_message(SAMPLE_TRANSCRIPT)
+    result = ask_followup("Speaker 0", "What is Speaker 0 talking about?", transcript_msg, [], mock_client)
+
+    assert "marketing" in result.lower()
+    assert "{" not in result
+    assert '"name"' not in result
+    assert '"confidence"' not in result
+
+
+def test_ask_followup_identity_uses_identity_system_prompt():
+    """Identity calls use the JSON system prompt, not the follow-up one."""
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _make_mock_completion("Alice")
+
+    transcript_msg = _make_transcript_message(SAMPLE_TRANSCRIPT)
+    ask_identity("Speaker 0", transcript_msg, [], mock_client)
+
+    call_messages = mock_client.chat.completions.create.call_args[1]["messages"]
+    system_messages = [m for m in call_messages if m["role"] == "system"]
+    assert len(system_messages) == 1
+    assert system_messages[0]["content"] == IDENTITY_SYSTEM_PROMPT
