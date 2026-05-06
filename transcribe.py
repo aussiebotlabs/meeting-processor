@@ -23,10 +23,13 @@ def get_media_info(path: Path) -> dict:
     """Get media information using ffprobe."""
     cmd = [
         "ffprobe",
-        "-v", "error",
-        "-show_entries", "format=duration,size:stream=codec_type",
-        "-of", "json",
-        str(path)
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration,size:stream=codec_type",
+        "-of",
+        "json",
+        str(path),
     ]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -48,32 +51,43 @@ def prepare_audio(input_path: Path) -> Path:
 
     # It's a video (or at least has a video stream), extract audio
     output_path = input_path.with_suffix(".transcribe.ogg")
-    
+
     # If the extracted file already exists and is newer than the source, reuse it
-    if output_path.exists() and output_path.stat().st_mtime > input_path.stat().st_mtime:
+    if (
+        output_path.exists()
+        and output_path.stat().st_mtime > input_path.stat().st_mtime
+    ):
         print(f"Reusing existing extracted audio: {output_path.name}")
         return output_path
 
     print(f"Video detected. Extracting audio to: {output_path.name}...")
-    
+
     # Extract mono audio, 16kHz, Opus at 32k (very efficient for speech)
     cmd = [
         "ffmpeg",
         "-y",
-        "-i", str(input_path),
-        "-vn",              # No video
-        "-ac", "1",         # Mono
-        "-ar", "16000",     # 16kHz
-        "-c:a", "libopus",
-        "-b:a", "32k",
-        str(output_path)
+        "-i",
+        str(input_path),
+        "-vn",  # No video
+        "-ac",
+        "1",  # Mono
+        "-ar",
+        "16000",  # 16kHz
+        "-c:a",
+        "libopus",
+        "-b:a",
+        "32k",
+        str(output_path),
     ]
-    
+
     try:
         subprocess.run(cmd, check=True, capture_output=True)
         return output_path
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        print(f"Warning: Failed to extract audio with ffmpeg ({e}). Uploading original file instead.", file=sys.stderr)
+        print(
+            f"Warning: Failed to extract audio with ffmpeg ({e}). Uploading original file instead.",
+            file=sys.stderr,
+        )
         return input_path
 
 
@@ -88,11 +102,11 @@ def transcribe(input_path: Path) -> None:
     print(f"Transcribing: {input_path.name}")
     if audio_path != input_path:
         print(f"Using processed audio: {audio_path.name}")
-    
+
     print(f"Original size: {input_path.stat().st_size / 1024 / 1024:.1f} MB")
     if audio_path != input_path:
         print(f"Upload size: {audio_path.stat().st_size / 1024 / 1024:.1f} MB")
-    
+
     print("Sending to Deepgram (nova-3, diarization enabled)...\n")
 
     client = DeepgramClient(api_key=api_key)
@@ -126,28 +140,25 @@ def transcribe(input_path: Path) -> None:
                 print(channel.alternatives[0].transcript or "")
         return
 
-    output_lines = []
+    output_list = []
     current_speaker = None
 
     for utterance in utterances:
         speaker = utterance.speaker
         transcript = utterance.transcript or ""
-        # start = utterance.start or 0.0
+        start = utterance.start or 0.0
         # end = utterance.end or 0.0
 
         if speaker != current_speaker:
             current_speaker = speaker
             label = f"Speaker {speaker}" if speaker is not None else "Unknown"
-            output_lines.append(f"\n[{label}]")
+            output_list.append(f"\n[{label}][{format_timestamp(start)}]\n  ")
 
-        # output_lines.append(f"  [{format_timestamp(start)} → {format_timestamp(end)}] {transcript}")
-        output_lines.append(f"  {transcript}")
-
-    print("\n".join(output_lines))
+        output_list.append(transcript)
 
     # Save transcript to file
     transcript_path = input_path.with_suffix(".txt")
-    transcript_path.write_text("\n".join(output_lines), encoding="utf-8")
+    transcript_path.write_text("".join(output_list), encoding="utf-8")
     print(f"\n\nTranscript saved to: {transcript_path}")
 
 
