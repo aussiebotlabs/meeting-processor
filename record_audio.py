@@ -103,33 +103,31 @@ def main() -> None:
     print(f"Starting parallel recording (Base: {base_name})...")
     print("Press Ctrl+C to stop early.")
 
-    # Start system audio recording (catap runs in background)
     system_session = record_system_audio(output_path=str(system_path))
-    
-    # Start microphone recording
     mic_recorder = MicRecorder(mic_path)
-    mic_recorder.start()
 
     start_time = time.time()
     try:
-        if args.duration:
-            # Wait for duration or Ctrl+C
-            remaining = args.duration
-            while remaining > 0:
-                sleep_time = min(remaining, 0.1)
-                time.sleep(sleep_time)
-                remaining -= sleep_time
-        else:
-            # Wait indefinitely for Ctrl+C
-            while True:
-                time.sleep(0.1)
-    except KeyboardInterrupt:
-        print("\nStopping recording...")
+        system_session.start()
+        mic_recorder.start()
+        try:
+            if args.duration:
+                remaining = args.duration
+                while remaining > 0:
+                    sleep_time = min(remaining, 0.1)
+                    time.sleep(sleep_time)
+                    remaining -= sleep_time
+            else:
+                while True:
+                    time.sleep(0.1)
+        except KeyboardInterrupt:
+            print("\nStopping recording...")
+    finally:
+        try:
+            system_session.close()
+        finally:
+            mic_recorder.stop()
 
-    # Stop recordings
-    system_session.stop()
-    mic_recorder.stop()
-    
     actual_duration = time.time() - start_time
     print(f"Recording finished. Duration: {actual_duration:.2f}s")
     print(f"System audio: {system_path}")

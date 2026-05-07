@@ -72,26 +72,69 @@ def test_mic_recorder_starts_and_stops(mock_sf, mock_sd, tmp_path: Path):
 @patch("record_audio.record_system_audio")
 @patch("record_audio.MicRecorder")
 @patch("record_audio.mix_audio")
-@patch("time.sleep", side_effect=[None, KeyboardInterrupt]) # Trigger stop after one loop
-def test_main_orchestration(mock_sleep, mock_mix, mock_mic_recorder, mock_catap, tmp_path: Path):
-    """Test the main function orchestration."""
+@patch("time.sleep", return_value=None)
+def test_main_orchestration_duration(mock_sleep, mock_mix, mock_mic_recorder, mock_catap):
+    """session.start and session.close are called on a normal timed run."""
     from record_audio import main
-    
-    # Mock the system session
+
     mock_session = MagicMock()
     mock_catap.return_value = mock_session
-    
-    # Mock the mic recorder instance
     mock_mic_inst = MagicMock()
     mock_mic_recorder.return_value = mock_mic_inst
-    
-    with patch("sys.argv", ["record_audio.py", "--duration", "1", "--output", "test"]):
-        # Run main, it should catch the KeyboardInterrupt from our mock_sleep
-        with patch("pathlib.Path.mkdir"): # Avoid creating recordings dir in test
+
+    with patch("sys.argv", ["record_audio.py", "--duration", "0.1", "--output", "test"]):
+        with patch("pathlib.Path.mkdir"):
             main()
-    
+
     mock_catap.assert_called_once()
+    mock_session.start.assert_called_once()
     mock_mic_inst.start.assert_called_once()
-    mock_session.stop.assert_called_once()
+    mock_session.close.assert_called_once()
     mock_mic_inst.stop.assert_called_once()
     mock_mix.assert_called_once()
+
+
+@patch("record_audio.record_system_audio")
+@patch("record_audio.MicRecorder")
+@patch("record_audio.mix_audio")
+@patch("time.sleep", side_effect=[None, KeyboardInterrupt])
+def test_main_orchestration_keyboard_interrupt(mock_sleep, mock_mix, mock_mic_recorder, mock_catap):
+    """session.close and mic_recorder.stop are called even when Ctrl+C is pressed."""
+    from record_audio import main
+
+    mock_session = MagicMock()
+    mock_catap.return_value = mock_session
+    mock_mic_inst = MagicMock()
+    mock_mic_recorder.return_value = mock_mic_inst
+
+    with patch("sys.argv", ["record_audio.py", "--duration", "10", "--output", "test"]):
+        with patch("pathlib.Path.mkdir"):
+            main()
+
+    mock_session.start.assert_called_once()
+    mock_mic_inst.start.assert_called_once()
+    mock_session.close.assert_called_once()
+    mock_mic_inst.stop.assert_called_once()
+    mock_mix.assert_called_once()
+
+
+@patch("record_audio.record_system_audio")
+@patch("record_audio.MicRecorder")
+@patch("record_audio.mix_audio")
+@patch("time.sleep", side_effect=[None, KeyboardInterrupt])
+def test_main_orchestration_indefinite_keyboard_interrupt(mock_sleep, mock_mix, mock_mic_recorder, mock_catap):
+    """Without --duration, session.close and mic_recorder.stop are called on Ctrl+C."""
+    from record_audio import main
+
+    mock_session = MagicMock()
+    mock_catap.return_value = mock_session
+    mock_mic_inst = MagicMock()
+    mock_mic_recorder.return_value = mock_mic_inst
+
+    with patch("sys.argv", ["record_audio.py", "--output", "test"]):
+        with patch("pathlib.Path.mkdir"):
+            main()
+
+    mock_session.start.assert_called_once()
+    mock_session.close.assert_called_once()
+    mock_mic_inst.stop.assert_called_once()
