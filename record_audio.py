@@ -15,40 +15,46 @@ import sounddevice as sd
 import soundfile as sf
 from catap import record_system_audio
 
+_MIX_BLOCK_SIZE = 4096  # frames per iteration (~93 ms at 44100 Hz)
+
+
+def _to_mono(block: np.ndarray) -> np.ndarray:
+    """Collapse a block to mono if it has multiple channels."""
+    return np.mean(block, axis=1) if block.ndim > 1 else block
+
 
 def mix_audio(system_path: Path, mic_path: Path, output_path: Path) -> None:
-    """Mix system and microphone audio into a single file."""
+    """Mix system and microphone audio into a single file, block by block."""
     if not system_path.exists() or not mic_path.exists():
         print("Warning: One or both audio files missing. Skipping mix.")
         return
 
     print(f"Mixing {system_path.name} and {mic_path.name}...")
-    
-    # Load audio
-    sys_data, sys_samplerate = sf.read(system_path)
-    mic_data, mic_samplerate = sf.read(mic_path)
 
-    # Ensure same sample rate (simple check, no resampling for now)
-    if sys_samplerate != mic_samplerate:
-        print(f"Warning: Sample rates differ ({sys_samplerate} vs {mic_samplerate}). Mix might be misaligned.")
+    with sf.SoundFile(system_path) as sys_f, sf.SoundFile(mic_path) as mic_f:
+        if sys_f.samplerate != mic_f.samplerate:
+            print(
+                f"Warning: Sample rates differ ({sys_f.samplerate} vs {mic_f.samplerate}). Mix might be misaligned."
+            )
 
-    # Ensure same number of channels (convert to mono for mixing if needed)
-    if sys_data.ndim > 1:
-        sys_data = np.mean(sys_data, axis=1)
-    if mic_data.ndim > 1:
-        mic_data = np.mean(mic_data, axis=1)
+        with sf.SoundFile(
+            output_path, mode="x", samplerate=sys_f.samplerate, channels=1
+        ) as out_f:
+            while True:
+                sys_block = _to_mono(sys_f.read(_MIX_BLOCK_SIZE, dtype="float32"))
+                mic_block = _to_mono(mic_f.read(_MIX_BLOCK_SIZE, dtype="float32"))
 
-    # Pad shorter track
-    max_len = max(len(sys_data), len(mic_data))
-    sys_padded = np.zeros(max_len)
-    mic_padded = np.zeros(max_len)
-    sys_padded[:len(sys_data)] = sys_data
-    mic_padded[:len(mic_data)] = mic_data
+                if len(sys_block) == 0 and len(mic_block) == 0:
+                    break
 
-    # Mix with conservative gain
-    mixed = (sys_padded + mic_padded) * 0.5
-    
-    sf.write(output_path, mixed, sys_samplerate)
+                max_len = max(len(sys_block), len(mic_block))
+                if len(sys_block) < max_len:
+                    sys_block = np.pad(sys_block, (0, max_len - len(sys_block)))
+                if len(mic_block) < max_len:
+                    mic_block = np.pad(mic_block, (0, max_len - len(mic_block)))
+
+                out_f.write((sys_block + mic_block) * 0.5)
+
     print(f"Mixed file saved to: {output_path}")
 
 

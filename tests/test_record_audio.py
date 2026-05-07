@@ -38,6 +38,66 @@ def test_mix_audio_pads_and_mixes(tmp_path: Path):
     assert mixed_data.ndim == 1  # Mixed to mono
 
 
+def test_mix_audio_values_are_half_sum(tmp_path: Path):
+    """Verify the mixed signal equals (sys + mic) * 0.5 sample-for-sample."""
+    sr = 44100
+    sys_path = tmp_path / "sys.wav"
+    mic_path = tmp_path / "mic.wav"
+    out_path = tmp_path / "out.wav"
+
+    rng = np.random.default_rng(42)
+    sys_data = rng.uniform(-0.5, 0.5, sr).astype(np.float32)
+    mic_data = rng.uniform(-0.5, 0.5, sr).astype(np.float32)
+    sf.write(sys_path, sys_data, sr, subtype="FLOAT")
+    sf.write(mic_path, mic_data, sr, subtype="FLOAT")
+
+    mix_audio(sys_path, mic_path, out_path)
+
+    mixed, _ = sf.read(out_path, dtype="float32")
+    expected = (sys_data + mic_data) * 0.5
+    # WAV PCM_16 output has ~3e-5 per-sample quantisation error
+    np.testing.assert_allclose(mixed, expected, atol=5e-5)
+
+
+def test_mix_audio_spans_multiple_blocks(tmp_path: Path):
+    """Ensure mixing works correctly when audio is longer than one block."""
+    from record_audio import _MIX_BLOCK_SIZE
+
+    sr = 44100
+    # 3× block size so we exercise the loop properly
+    n_frames = _MIX_BLOCK_SIZE * 3
+    sys_path = tmp_path / "sys.wav"
+    mic_path = tmp_path / "mic.wav"
+    out_path = tmp_path / "out.wav"
+
+    sys_data = np.zeros(n_frames, dtype=np.float32)
+    mic_data = np.ones(n_frames, dtype=np.float32) * 0.4
+    sf.write(sys_path, sys_data, sr, subtype="FLOAT")
+    sf.write(mic_path, mic_data, sr, subtype="FLOAT")
+
+    mix_audio(sys_path, mic_path, out_path)
+
+    mixed, _ = sf.read(out_path, dtype="float32")
+    assert len(mixed) == n_frames
+    # WAV PCM_16 output has ~3e-5 per-sample quantisation error
+    np.testing.assert_allclose(mixed, 0.2, atol=5e-5)
+
+
+def test_mix_audio_samplerate_mismatch_warns(tmp_path: Path, capsys):
+    """A mismatch in sample rates should print a warning."""
+    sys_path = tmp_path / "sys.wav"
+    mic_path = tmp_path / "mic.wav"
+    out_path = tmp_path / "out.wav"
+
+    sf.write(sys_path, np.zeros(100, dtype=np.float32), 44100)
+    sf.write(mic_path, np.zeros(100, dtype=np.float32), 16000)
+
+    mix_audio(sys_path, mic_path, out_path)
+
+    captured = capsys.readouterr()
+    assert "Sample rates differ" in captured.out
+
+
 def test_mix_audio_missing_files(tmp_path: Path, capsys):
     """Test that missing files are handled gracefully."""
     mix_audio(tmp_path / "nonexistent.wav", tmp_path / "mic.wav", tmp_path / "out.wav")
