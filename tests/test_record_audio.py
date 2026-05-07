@@ -1,6 +1,6 @@
 """Tests for record_audio.py."""
 
-import os
+import math
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -8,94 +8,173 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from record_audio import MicRecorder, mix_audio
+from record_audio import (
+    NORMALIZE_BLOCK_SECONDS,
+    TARGET_DBOV,
+    TARGET_SR,
+    MicRecorder,
+    asl_p56,
+    mix_audio,
+)
 
 
-def test_mix_audio_pads_and_mixes(tmp_path: Path):
-    """Test that mixing handles different lengths and mono conversion."""
+# ---------------------------------------------------------------------------
+# asl_p56 unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_asl_p56_returns_none_for_silence():
+    """A block of zeros must return None (no active speech detected)."""
+    x = np.zeros(TARGET_SR * 5, dtype=np.float32)
+    assert asl_p56(x, TARGET_SR) is None
+
+
+def test_asl_p56_returns_none_for_empty():
+    """An empty array must return None."""
+    assert asl_p56(np.array([]), TARGET_SR) is None
+
+
+def test_asl_p56_matches_known_rms():
+    """A 1 kHz sine at amplitude 0.1 should give asl_rms ≈ 0.1/sqrt(2) ≈ 0.0707."""
+    fs = TARGET_SR
+    duration = 10  # seconds — long enough for the algorithm to converge
+    t = np.linspace(0, duration, fs * duration, endpoint=False)
+    x = (0.1 * np.sin(2 * math.pi * 1000 * t)).astype(np.float32)
+    asl_rms = asl_p56(x, fs)
+    assert asl_rms is not None
+    expected = 0.1 / math.sqrt(2)
+    assert abs(asl_rms - expected) / expected < 0.05  # within 5 %
+
+
+# ---------------------------------------------------------------------------
+# mix_audio integration tests
+# ---------------------------------------------------------------------------
+
+
+def _write_sine(path: Path, freq: float, amplitude: float, duration: float, sr: int, channels: int = 1) -> None:
+    """Write a pure sine wave WAV file."""
+    t = np.linspace(0, duration, int(sr * duration), endpoint=False)
+    wave = (amplitude * np.sin(2 * math.pi * freq * t)).astype(np.float32)
+    if channels == 2:
+        wave = np.stack([wave, wave], axis=1)
+    sf.write(path, wave, sr, subtype="FLOAT")
+
+
+def test_mix_audio_output_is_target_sr(tmp_path: Path):
+    """Mixed output must be TARGET_SR, mono, and the right length."""
+    sr = TARGET_SR
+    dur = 3.0  # seconds
     sys_path = tmp_path / "sys.wav"
     mic_path = tmp_path / "mic.wav"
     out_path = tmp_path / "out.wav"
 
-    # Create dummy audio files
-    # System: 1 second of 440Hz sine wave (stereo)
-    sr = 44100
-    t = np.linspace(0, 1, sr)
-    sys_data = np.stack([np.sin(2 * np.pi * 440 * t), np.sin(2 * np.pi * 440 * t)], axis=1)
-    sf.write(sys_path, sys_data, sr)
-
-    # Mic: 0.5 seconds of 880Hz sine wave (mono)
-    t_mic = np.linspace(0, 0.5, sr // 2)
-    mic_data = np.sin(2 * np.pi * 880 * t_mic)
-    sf.write(mic_path, mic_data, sr)
+    _write_sine(sys_path, 440, 0.3, dur, sr)
+    _write_sine(mic_path, 880, 0.3, dur, sr)
 
     mix_audio(sys_path, mic_path, out_path)
 
     assert out_path.exists()
-    mixed_data, mixed_sr = sf.read(out_path)
-    assert mixed_sr == sr
-    assert len(mixed_data) == len(sys_data)  # Padded to max length
-    assert mixed_data.ndim == 1  # Mixed to mono
+    mixed, mixed_sr = sf.read(out_path)
+    assert mixed_sr == TARGET_SR
+    assert mixed.ndim == 1
+    # Length should be ~dur * TARGET_SR (allow ±1 % rounding from resample_poly)
+    assert abs(len(mixed) - int(dur * TARGET_SR)) < int(0.01 * dur * TARGET_SR) + 1
 
 
-def test_mix_audio_values_are_half_sum(tmp_path: Path):
-    """Verify the mixed signal equals (sys + mic) * 0.5 sample-for-sample."""
-    sr = 44100
+def test_mix_audio_pads_different_lengths(tmp_path: Path):
+    """Shorter source is zero-padded to match the longer one."""
+    sr = TARGET_SR
     sys_path = tmp_path / "sys.wav"
     mic_path = tmp_path / "mic.wav"
     out_path = tmp_path / "out.wav"
 
-    rng = np.random.default_rng(42)
-    sys_data = rng.uniform(-0.5, 0.5, sr).astype(np.float32)
-    mic_data = rng.uniform(-0.5, 0.5, sr).astype(np.float32)
-    sf.write(sys_path, sys_data, sr, subtype="FLOAT")
-    sf.write(mic_path, mic_data, sr, subtype="FLOAT")
+    _write_sine(sys_path, 440, 0.3, 5.0, sr)
+    _write_sine(mic_path, 880, 0.3, 2.0, sr)  # shorter
+
+    mix_audio(sys_path, mic_path, out_path)
+
+    mixed, _ = sf.read(out_path)
+    expected_len = int(5.0 * TARGET_SR)
+    assert abs(len(mixed) - expected_len) < 500  # within 500 samples
+
+
+def test_mix_audio_normalises_to_target_level(tmp_path: Path):
+    """When only one source is non-silent, the mix should be near TARGET_DBOV."""
+    sr = TARGET_SR
+    dur = 20.0  # seconds — long enough for P.56 to converge
+    sys_path = tmp_path / "sys.wav"
+    mic_path = tmp_path / "mic.wav"
+    out_path = tmp_path / "out.wav"
+
+    # System audio at a high amplitude, mic silent
+    _write_sine(sys_path, 440, 0.5, dur, sr)
+    sf.write(mic_path, np.zeros(int(sr * dur), dtype=np.float32), sr, subtype="FLOAT")
 
     mix_audio(sys_path, mic_path, out_path)
 
     mixed, _ = sf.read(out_path, dtype="float32")
-    expected = (sys_data + mic_data) * 0.5
-    # WAV PCM_16 output has ~3e-5 per-sample quantisation error
-    np.testing.assert_allclose(mixed, expected, atol=5e-5)
+    asl_rms = asl_p56(mixed, TARGET_SR)
+    assert asl_rms is not None
+    measured_dbov = 20.0 * math.log10(asl_rms)
+    assert abs(measured_dbov - TARGET_DBOV) < 2.0  # within 2 dB
 
 
 def test_mix_audio_spans_multiple_blocks(tmp_path: Path):
-    """Ensure mixing works correctly when audio is longer than one block."""
-    from record_audio import _MIX_BLOCK_SIZE
-
-    sr = 44100
-    # 3× block size so we exercise the loop properly
-    n_frames = _MIX_BLOCK_SIZE * 3
+    """Audio longer than NORMALIZE_BLOCK_SECONDS must be handled across blocks."""
+    sr = TARGET_SR
+    dur = NORMALIZE_BLOCK_SECONDS * 2 + 10  # spans 3 blocks
     sys_path = tmp_path / "sys.wav"
     mic_path = tmp_path / "mic.wav"
     out_path = tmp_path / "out.wav"
 
-    sys_data = np.zeros(n_frames, dtype=np.float32)
-    mic_data = np.ones(n_frames, dtype=np.float32) * 0.4
-    sf.write(sys_path, sys_data, sr, subtype="FLOAT")
-    sf.write(mic_path, mic_data, sr, subtype="FLOAT")
+    _write_sine(sys_path, 440, 0.3, dur, sr)
+    _write_sine(mic_path, 880, 0.3, dur, sr)
 
+    mix_audio(sys_path, mic_path, out_path)
+
+    mixed, mixed_sr = sf.read(out_path)
+    assert mixed_sr == TARGET_SR
+    expected_len = int(dur * TARGET_SR)
+    assert abs(len(mixed) - expected_len) < 1000
+
+
+def test_mix_audio_resamples_mismatched_inputs(tmp_path: Path):
+    """48 kHz stereo system + 44.1 kHz mono mic → 16 kHz mono output."""
+    dur = 3.0
+    sys_path = tmp_path / "sys.wav"
+    mic_path = tmp_path / "mic.wav"
+    out_path = tmp_path / "out.wav"
+
+    _write_sine(sys_path, 440, 0.3, dur, 48_000, channels=2)
+    _write_sine(mic_path, 880, 0.3, dur, 44_100, channels=1)
+
+    mix_audio(sys_path, mic_path, out_path)
+
+    _, mixed_sr = sf.read(out_path)
+    assert mixed_sr == TARGET_SR
+
+    info = sf.info(out_path)
+    assert info.channels == 1
+    expected_frames = int(dur * TARGET_SR)
+    assert abs(info.frames - expected_frames) < int(0.01 * dur * TARGET_SR) + 1
+
+
+def test_mix_audio_silent_block_passthrough(tmp_path: Path):
+    """A fully silent input must not cause division-by-zero and output near-silence."""
+    sr = TARGET_SR
+    dur = 5.0
+    sys_path = tmp_path / "sys.wav"
+    mic_path = tmp_path / "mic.wav"
+    out_path = tmp_path / "out.wav"
+
+    sf.write(sys_path, np.zeros(int(sr * dur), dtype=np.float32), sr, subtype="FLOAT")
+    sf.write(mic_path, np.zeros(int(sr * dur), dtype=np.float32), sr, subtype="FLOAT")
+
+    # Must not raise
     mix_audio(sys_path, mic_path, out_path)
 
     mixed, _ = sf.read(out_path, dtype="float32")
-    assert len(mixed) == n_frames
-    # WAV PCM_16 output has ~3e-5 per-sample quantisation error
-    np.testing.assert_allclose(mixed, 0.2, atol=5e-5)
-
-
-def test_mix_audio_samplerate_mismatch_warns(tmp_path: Path, capsys):
-    """A mismatch in sample rates should print a warning."""
-    sys_path = tmp_path / "sys.wav"
-    mic_path = tmp_path / "mic.wav"
-    out_path = tmp_path / "out.wav"
-
-    sf.write(sys_path, np.zeros(100, dtype=np.float32), 44100)
-    sf.write(mic_path, np.zeros(100, dtype=np.float32), 16000)
-
-    mix_audio(sys_path, mic_path, out_path)
-
-    captured = capsys.readouterr()
-    assert "Sample rates differ" in captured.out
+    assert np.max(np.abs(mixed)) < 1e-4
 
 
 def test_mix_audio_missing_files(tmp_path: Path, capsys):
@@ -105,28 +184,51 @@ def test_mix_audio_missing_files(tmp_path: Path, capsys):
     assert "Warning: One or both audio files missing" in captured.out
 
 
+def test_mix_audio_overwrites_existing_output(tmp_path: Path):
+    """mix_audio should overwrite an existing output file without error."""
+    sr = TARGET_SR
+    dur = 2.0
+    sys_path = tmp_path / "sys.wav"
+    mic_path = tmp_path / "mic.wav"
+    out_path = tmp_path / "out.wav"
+
+    _write_sine(sys_path, 440, 0.3, dur, sr)
+    _write_sine(mic_path, 880, 0.3, dur, sr)
+
+    mix_audio(sys_path, mic_path, out_path)
+    mix_audio(sys_path, mic_path, out_path)  # second call must not raise
+
+    assert out_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# MicRecorder tests (unchanged from original)
+# ---------------------------------------------------------------------------
+
+
 @patch("sounddevice.InputStream")
 @patch("soundfile.SoundFile")
 def test_mic_recorder_starts_and_stops(mock_sf, mock_sd, tmp_path: Path):
     """Test that MicRecorder orchestrates sounddevice and soundfile."""
+    import time
+
     out_path = tmp_path / "mic.wav"
     recorder = MicRecorder(out_path)
-    
-    # Start in a thread
+
     recorder.start()
-    
-    # Give it a moment to start
-    import time
     time.sleep(0.1)
-    
     assert recorder._thread.is_alive()
-    
-    # Stop it
+
     recorder.stop()
     assert not recorder._thread.is_alive()
-    
+
     mock_sd.assert_called_once()
     mock_sf.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# main() orchestration tests (unchanged from original)
+# ---------------------------------------------------------------------------
 
 
 @patch("record_audio.record_system_audio")
