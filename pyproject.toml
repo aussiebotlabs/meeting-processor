@@ -13,6 +13,7 @@ dependencies = [
     "soundfile>=0.12.1",
     "numpy>=1.26.0",
     "scipy>=1.11",
+    "questionary>=2.0",
 ]
 
 [tool.pytest.ini_options]

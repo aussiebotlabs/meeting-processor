@@ -15,6 +15,7 @@ from record_audio import (
     MicRecorder,
     asl_p56,
     mix_audio,
+    select_microphone,
 )
 
 
@@ -227,15 +228,75 @@ def test_mic_recorder_starts_and_stops(mock_sf, mock_sd, tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
+# select_microphone tests
+# ---------------------------------------------------------------------------
+
+_FAKE_DEVICES = [
+    {"name": "Built-in Microphone", "max_input_channels": 2, "max_output_channels": 0},
+    {"name": "HDMI Output", "max_input_channels": 0, "max_output_channels": 2},
+    {"name": "USB Headset", "max_input_channels": 1, "max_output_channels": 1},
+]
+
+
+@patch("questionary.select")
+@patch("sounddevice.query_devices", return_value=_FAKE_DEVICES)
+def test_select_microphone_returns_device_index(_mock_query, mock_select):
+    """Selecting the first input device returns its original device index."""
+    mock_select.return_value.ask.return_value = "0: Built-in Microphone"
+    result = select_microphone()
+    assert result == 0
+
+
+@patch("questionary.select")
+@patch("sounddevice.query_devices", return_value=_FAKE_DEVICES)
+def test_select_microphone_returns_correct_index_for_second_input(_mock_query, mock_select):
+    """Selecting USB Headset (index 2 in the device list) returns 2."""
+    mock_select.return_value.ask.return_value = "2: USB Headset"
+    result = select_microphone()
+    assert result == 2
+
+
+@patch("questionary.select")
+@patch("sounddevice.query_devices", return_value=_FAKE_DEVICES)
+def test_select_microphone_filters_output_only_devices(_mock_query, mock_select):
+    """Output-only devices must not appear in the questionary choices."""
+    mock_select.return_value.ask.return_value = "0: Built-in Microphone"
+    select_microphone()
+    _, kwargs = mock_select.call_args
+    choices = kwargs.get("choices") or mock_select.call_args[0][1]
+    labels = [c for c in choices]
+    assert not any("HDMI Output" in label for label in labels)
+    assert any("Built-in Microphone" in label for label in labels)
+    assert any("USB Headset" in label for label in labels)
+
+
+@patch("sounddevice.query_devices", return_value=[])
+def test_select_microphone_raises_when_no_input_devices(_mock_query):
+    """RuntimeError is raised when no input devices are available."""
+    with pytest.raises(RuntimeError, match="No input devices found"):
+        select_microphone()
+
+
+@patch("questionary.select")
+@patch("sounddevice.query_devices", return_value=_FAKE_DEVICES)
+def test_select_microphone_raises_keyboard_interrupt_on_cancel(_mock_query, mock_select):
+    """Cancelling the prompt (ask() returns None) raises KeyboardInterrupt."""
+    mock_select.return_value.ask.return_value = None
+    with pytest.raises(KeyboardInterrupt):
+        select_microphone()
+
+
+# ---------------------------------------------------------------------------
 # main() orchestration tests (unchanged from original)
 # ---------------------------------------------------------------------------
 
 
+@patch("record_audio.select_microphone", return_value=0)
 @patch("record_audio.record_system_audio")
 @patch("record_audio.MicRecorder")
 @patch("record_audio.mix_audio")
 @patch("time.sleep", return_value=None)
-def test_main_orchestration_duration(mock_sleep, mock_mix, mock_mic_recorder, mock_catap):
+def test_main_orchestration_duration(_mock_sleep, mock_mix, mock_mic_recorder, mock_catap, _mock_select_mic):
     """session.start and session.close are called on a normal timed run."""
     from record_audio import main
 
@@ -256,11 +317,12 @@ def test_main_orchestration_duration(mock_sleep, mock_mix, mock_mic_recorder, mo
     mock_mix.assert_called_once()
 
 
+@patch("record_audio.select_microphone", return_value=0)
 @patch("record_audio.record_system_audio")
 @patch("record_audio.MicRecorder")
 @patch("record_audio.mix_audio")
 @patch("time.sleep", side_effect=[None, KeyboardInterrupt])
-def test_main_orchestration_keyboard_interrupt(mock_sleep, mock_mix, mock_mic_recorder, mock_catap):
+def test_main_orchestration_keyboard_interrupt(_mock_sleep, mock_mix, mock_mic_recorder, mock_catap, _mock_select_mic):
     """session.close and mic_recorder.stop are called even when Ctrl+C is pressed."""
     from record_audio import main
 
@@ -280,11 +342,12 @@ def test_main_orchestration_keyboard_interrupt(mock_sleep, mock_mix, mock_mic_re
     mock_mix.assert_called_once()
 
 
+@patch("record_audio.select_microphone", return_value=0)
 @patch("record_audio.record_system_audio")
 @patch("record_audio.MicRecorder")
 @patch("record_audio.mix_audio")
 @patch("time.sleep", side_effect=[None, KeyboardInterrupt])
-def test_main_orchestration_indefinite_keyboard_interrupt(mock_sleep, mock_mix, mock_mic_recorder, mock_catap):
+def test_main_orchestration_indefinite_keyboard_interrupt(_mock_sleep, _mock_mix, mock_mic_recorder, mock_catap, _mock_select_mic):
     """Without --duration, session.close and mic_recorder.stop are called on Ctrl+C."""
     from record_audio import main
 
@@ -300,3 +363,48 @@ def test_main_orchestration_indefinite_keyboard_interrupt(mock_sleep, mock_mix, 
     mock_session.start.assert_called_once()
     mock_session.close.assert_called_once()
     mock_mic_inst.stop.assert_called_once()
+
+
+@patch("record_audio.select_microphone")
+@patch("record_audio.record_system_audio")
+@patch("record_audio.MicRecorder")
+@patch("record_audio.mix_audio")
+@patch("time.sleep", return_value=None)
+def test_main_calls_select_microphone_when_no_mic_arg(_mock_sleep, _mock_mix, mock_mic_recorder, mock_catap, mock_select_mic):
+    """select_microphone() is called when --mic is not provided."""
+    from record_audio import main
+
+    mock_select_mic.return_value = 1
+    mock_catap.return_value = MagicMock()
+    mock_mic_recorder.return_value = MagicMock()
+
+    with patch("sys.argv", ["record_audio.py", "--duration", "0.1", "--output", "test"]):
+        with patch("pathlib.Path.mkdir"):
+            main()
+
+    mock_select_mic.assert_called_once()
+    mock_mic_recorder.assert_called_once()
+    _, kwargs = mock_mic_recorder.call_args
+    assert kwargs.get("device") == 1
+
+
+@patch("record_audio.select_microphone")
+@patch("record_audio.record_system_audio")
+@patch("record_audio.MicRecorder")
+@patch("record_audio.mix_audio")
+@patch("time.sleep", return_value=None)
+def test_main_skips_select_microphone_with_mic_arg(_mock_sleep, _mock_mix, mock_mic_recorder, mock_catap, mock_select_mic):
+    """select_microphone() is NOT called when --mic index is provided."""
+    from record_audio import main
+
+    mock_catap.return_value = MagicMock()
+    mock_mic_recorder.return_value = MagicMock()
+
+    with patch("sys.argv", ["record_audio.py", "--duration", "0.1", "--output", "test", "--mic", "2"]):
+        with patch("pathlib.Path.mkdir"):
+            main()
+
+    mock_select_mic.assert_not_called()
+    mock_mic_recorder.assert_called_once()
+    _, kwargs = mock_mic_recorder.call_args
+    assert kwargs.get("device") == 2

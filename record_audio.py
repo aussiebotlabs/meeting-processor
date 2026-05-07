@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import questionary
 import scipy.signal as sp_signal
 import sounddevice as sd
 import soundfile as sf
@@ -208,13 +209,42 @@ def mix_audio(system_path: Path, mic_path: Path, output_path: Path) -> None:
     print(f"Mixed file saved to: {output_path}")
 
 
+def select_microphone() -> int:
+    """Interactively prompt the user to pick an input device.
+
+    Lists all devices with at least one input channel, presents them with
+    arrow-key navigation, and returns the chosen device index as understood
+    by sounddevice.
+    """
+    devices = sd.query_devices()
+    input_devices = [
+        (i, d) for i, d in enumerate(devices) if d["max_input_channels"] > 0
+    ]
+    if not input_devices:
+        raise RuntimeError("No input devices found.")
+
+    choices = [f"{i}: {d['name']}" for i, d in input_devices]
+    answer = questionary.select("Select microphone:", choices=choices).ask()
+    if answer is None:
+        raise KeyboardInterrupt
+    device_index = int(answer.split(":")[0])
+    return device_index
+
+
 class MicRecorder:
     """Recorder for microphone audio using sounddevice."""
 
-    def __init__(self, output_path: Path, samplerate: int = 44100, channels: int = 1):
+    def __init__(
+        self,
+        output_path: Path,
+        samplerate: int = 44100,
+        channels: int = 1,
+        device: int | str | None = None,
+    ):
         self.output_path = output_path
         self.samplerate = samplerate
         self.channels = channels
+        self.device = device
         self.stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -224,7 +254,10 @@ class MicRecorder:
                 self.output_path, mode="x", samplerate=self.samplerate, channels=self.channels
             ) as file:
                 with sd.InputStream(
-                    samplerate=self.samplerate, channels=self.channels, callback=lambda data, frames, time, status: file.write(data)
+                    samplerate=self.samplerate,
+                    channels=self.channels,
+                    device=self.device,
+                    callback=lambda data, frames, time, status: file.write(data),
                 ):
                     self.stop_event.wait()
         except Exception as e:
@@ -244,6 +277,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Record system and microphone audio.")
     parser.add_argument("--duration", type=float, help="Duration to record in seconds")
     parser.add_argument("--output", type=str, help="Output base name (prefix)")
+    parser.add_argument(
+        "--mic",
+        type=str,
+        default=None,
+        help="Microphone device index or name (skips interactive selection)",
+    )
     args = parser.parse_args()
 
     # Setup output paths
@@ -256,11 +295,16 @@ def main() -> None:
     mic_path = output_dir / f"{base_name}.mic.wav"
     mixed_path = output_dir / f"{base_name}.mixed.wav"
 
+    if args.mic is not None:
+        mic_device: int | str | None = int(args.mic) if args.mic.isdigit() else args.mic
+    else:
+        mic_device = select_microphone()
+
     print(f"Starting parallel recording (Base: {base_name})...")
     print("Press Ctrl+C to stop early.")
 
     system_session = record_system_audio(output_path=str(system_path))
-    mic_recorder = MicRecorder(mic_path)
+    mic_recorder = MicRecorder(mic_path, device=mic_device)
 
     start_time = time.time()
     try:
