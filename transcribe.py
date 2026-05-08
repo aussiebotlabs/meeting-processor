@@ -65,7 +65,9 @@ def prepare_audio(input_path: Path) -> Path:
         print(f"Reusing existing Opus audio: {output_path.name}")
         return output_path
 
-    reason = "Video detected." if has_video else f"Non-Opus audio ({input_path.suffix})."
+    reason = (
+        "Video detected." if has_video else f"Non-Opus audio ({input_path.suffix})."
+    )
     print(f"{reason} Encoding to Opus: {output_path.name}...")
 
     cmd = [
@@ -163,7 +165,7 @@ def transcribe(input_path: Path) -> None:
 
     # Save transcript to file
     transcript_path = input_path.with_suffix(".txt")
-    transcript_path.write_text("".join(output_list), encoding="utf-8")
+    transcript_path.write_text(" ".join(output_list), encoding="utf-8")
     print(f"\n\nTranscript saved to: {transcript_path}")
 
 
