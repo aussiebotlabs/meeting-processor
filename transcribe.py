@@ -26,7 +26,7 @@ def get_media_info(path: Path) -> dict:
         "-v",
         "error",
         "-show_entries",
-        "format=duration,size:stream=codec_type",
+        "format=duration,size:stream=codec_type,codec_name",
         "-of",
         "json",
         str(path),
@@ -39,30 +39,35 @@ def get_media_info(path: Path) -> dict:
 
 
 def prepare_audio(input_path: Path) -> Path:
-    """Ensure we have a suitable audio file for transcription.
-    If input is video, extracts audio to a sidecar file.
+    """Ensure audio is Opus-encoded before transcription.
+
+    Encodes to a .transcribe.ogg sidecar unless the input is already a
+    pure Opus stream with no video track.  Reuses the sidecar when it is
+    newer than the source.
     """
     info = get_media_info(input_path)
     streams = info.get("streams", [])
     has_video = any(s.get("codec_type") == "video" for s in streams)
+    audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
+    already_opus = bool(audio_streams) and all(
+        s.get("codec_name") == "opus" for s in audio_streams
+    )
 
-    if not has_video:
+    if already_opus and not has_video:
         return input_path
 
-    # It's a video (or at least has a video stream), extract audio
     output_path = input_path.with_suffix(".transcribe.ogg")
 
-    # If the extracted file already exists and is newer than the source, reuse it
     if (
         output_path.exists()
         and output_path.stat().st_mtime > input_path.stat().st_mtime
     ):
-        print(f"Reusing existing extracted audio: {output_path.name}")
+        print(f"Reusing existing Opus audio: {output_path.name}")
         return output_path
 
-    print(f"Video detected. Extracting audio to: {output_path.name}...")
+    reason = "Video detected." if has_video else f"Non-Opus audio ({input_path.suffix})."
+    print(f"{reason} Encoding to Opus: {output_path.name}...")
 
-    # Extract mono audio, 16kHz, Opus at 32k (very efficient for speech)
     cmd = [
         "ffmpeg",
         "-y",
@@ -85,7 +90,7 @@ def prepare_audio(input_path: Path) -> Path:
         return output_path
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         print(
-            f"Warning: Failed to extract audio with ffmpeg ({e}). Uploading original file instead.",
+            f"Warning: Failed to encode audio with ffmpeg ({e}). Uploading original file instead.",
             file=sys.stderr,
         )
         return input_path
