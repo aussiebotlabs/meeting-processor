@@ -13,6 +13,7 @@ wheels/
 .env
 
 # Audio files and transcripts (generated content)
+recordings/
 *.m4a
 *.txt
 *.mp3

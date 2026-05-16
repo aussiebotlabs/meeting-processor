@@ -1,5 +1,6 @@
 """Transcribe an audio file using Deepgram with speaker diarization."""
 
+import argparse
 import json
 import os
 import subprocess
@@ -98,7 +99,7 @@ def prepare_audio(input_path: Path) -> Path:
         return input_path
 
 
-def transcribe(input_path: Path) -> None:
+def transcribe(input_path: Path, language: str = "en") -> None:
     api_key = os.getenv("DEEPGRAM_KEY")
     if not api_key:
         print("Error: DEEPGRAM_KEY not set in environment", file=sys.stderr)
@@ -114,7 +115,9 @@ def transcribe(input_path: Path) -> None:
     if audio_path != input_path:
         print(f"Upload size: {audio_path.stat().st_size / 1024 / 1024:.1f} MB")
 
-    print("Sending to Deepgram (nova-3, diarization enabled)...\n")
+    model = "nova-3"
+
+    print(f"Sending to Deepgram ({model}, language={language}, diarization enabled)...\n")
 
     client = DeepgramClient(api_key=api_key)
 
@@ -123,7 +126,8 @@ def transcribe(input_path: Path) -> None:
 
     response = client.listen.v1.media.transcribe_file(
         request=audio_bytes,
-        model="nova-3",
+        model=model,
+        language=language,
         diarize=True,
         smart_format=True,
         punctuate=True,
@@ -170,8 +174,18 @@ def transcribe(input_path: Path) -> None:
 
 
 def main() -> None:
-    if len(sys.argv) > 1:
-        audio_path = Path(sys.argv[1])
+    parser = argparse.ArgumentParser(description="Transcribe audio using Deepgram.")
+    parser.add_argument("audio_file", nargs="?", help="Path to audio file")
+    parser.add_argument(
+        "--language",
+        "-l",
+        default="en",
+        help="BCP-47 language code (e.g. en, de, fr, es). Default: en",
+    )
+    args = parser.parse_args()
+
+    if args.audio_file:
+        audio_path = Path(args.audio_file)
     else:
         # Auto-detect: find the most recently modified .m4a in the project dir
         project_dir = Path(__file__).parent
@@ -180,7 +194,7 @@ def main() -> None:
         )
         if not m4a_files:
             print("No .m4a files found in the project directory.", file=sys.stderr)
-            print("Usage: uv run transcribe.py [audio_file.m4a]", file=sys.stderr)
+            print("Usage: uv run transcribe.py [audio_file] [--language LANG]", file=sys.stderr)
             sys.exit(1)
         audio_path = m4a_files[0]
 
@@ -188,7 +202,7 @@ def main() -> None:
         print(f"File not found: {audio_path}", file=sys.stderr)
         sys.exit(1)
 
-    transcribe(audio_path)
+    transcribe(audio_path, language=args.language)
 
 
 if __name__ == "__main__":
