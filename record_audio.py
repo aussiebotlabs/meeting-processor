@@ -17,6 +17,7 @@ import scipy.signal as sp_signal
 import sounddevice as sd
 import soundfile as sf
 from catap import record_system_audio
+from tqdm import tqdm
 
 TARGET_SR: int = 16_000          # output sample rate for mixed file
 TARGET_DBOV: float = -26.0       # target active speech level (dBov)
@@ -175,6 +176,8 @@ def mix_audio(system_path: Path, mic_path: Path, output_path: Path) -> None:
         sys_sr = sys_f.samplerate
         mic_sr = mic_f.samplerate
 
+        total_duration_s = max(sys_f.frames / sys_sr, mic_f.frames / mic_sr)
+
         # How many source frames to read per block so that each resampled
         # block is exactly NORMALIZE_BLOCK_SECONDS * TARGET_SR frames.
         sys_block_src = int(NORMALIZE_BLOCK_SECONDS * sys_sr)
@@ -183,28 +186,33 @@ def mix_audio(system_path: Path, mic_path: Path, output_path: Path) -> None:
         with sf.SoundFile(
             output_path, mode="w", samplerate=TARGET_SR, channels=1, subtype="PCM_16"
         ) as out_f:
-            while True:
-                sys_raw = _to_mono(sys_f.read(sys_block_src, dtype="float32"))
-                mic_raw = _to_mono(mic_f.read(mic_block_src, dtype="float32"))
+            with tqdm(total=total_duration_s, desc="Mixing", unit="s", unit_scale=True) as pbar:
+                while True:
+                    sys_raw = _to_mono(sys_f.read(sys_block_src, dtype="float32"))
+                    mic_raw = _to_mono(mic_f.read(mic_block_src, dtype="float32"))
 
-                if len(sys_raw) == 0 and len(mic_raw) == 0:
-                    break
+                    if len(sys_raw) == 0 and len(mic_raw) == 0:
+                        break
 
-                sys_block = _resample(sys_raw, sys_sr, TARGET_SR)
-                mic_block = _resample(mic_raw, mic_sr, TARGET_SR)
+                    elapsed_s = max(len(sys_raw) / sys_sr, len(mic_raw) / mic_sr)
 
-                # Pad shorter block so both are the same length
-                max_len = max(len(sys_block), len(mic_block))
-                if len(sys_block) < max_len:
-                    sys_block = np.pad(sys_block, (0, max_len - len(sys_block)))
-                if len(mic_block) < max_len:
-                    mic_block = np.pad(mic_block, (0, max_len - len(mic_block)))
+                    sys_block = _resample(sys_raw, sys_sr, TARGET_SR)
+                    mic_block = _resample(mic_raw, mic_sr, TARGET_SR)
 
-                sys_gain = _p56_gain(sys_block, TARGET_SR)
-                mic_gain = _p56_gain(mic_block, TARGET_SR)
+                    # Pad shorter block so both are the same length
+                    max_len = max(len(sys_block), len(mic_block))
+                    if len(sys_block) < max_len:
+                        sys_block = np.pad(sys_block, (0, max_len - len(sys_block)))
+                    if len(mic_block) < max_len:
+                        mic_block = np.pad(mic_block, (0, max_len - len(mic_block)))
 
-                mixed = sys_block * sys_gain + mic_block * mic_gain
-                out_f.write(np.clip(mixed, -1.0, 1.0))
+                    sys_gain = _p56_gain(sys_block, TARGET_SR)
+                    mic_gain = _p56_gain(mic_block, TARGET_SR)
+
+                    mixed = sys_block * sys_gain + mic_block * mic_gain
+                    out_f.write(np.clip(mixed, -1.0, 1.0))
+
+                    pbar.update(elapsed_s)
 
     print(f"Mixed file saved to: {output_path}")
 

@@ -1,5 +1,6 @@
 """Transcribe an audio file using Deepgram with speaker diarization."""
 
+import argparse
 import json
 import os
 import subprocess
@@ -11,6 +12,8 @@ from deepgram.core.request_options import RequestOptions
 from dotenv import load_dotenv
 
 load_dotenv()
+
+ENCODE_BITRATE_THRESHOLD_BPS = 128_000
 
 
 def format_timestamp(seconds: float) -> str:
@@ -26,7 +29,7 @@ def get_media_info(path: Path) -> dict:
         "-v",
         "error",
         "-show_entries",
-        "format=duration,size:stream=codec_type",
+        "format=duration,size:stream=codec_type,codec_name",
         "-of",
         "json",
         str(path),
@@ -38,31 +41,62 @@ def get_media_info(path: Path) -> dict:
         return {}
 
 
-def prepare_audio(input_path: Path) -> Path:
-    """Ensure we have a suitable audio file for transcription.
-    If input is video, extracts audio to a sidecar file.
-    """
-    info = get_media_info(input_path)
+def container_bitrate_bps(info: dict, file_size: int) -> float | None:
+    """Compute container bitrate from file size and duration."""
+    duration_str = info.get("format", {}).get("duration")
+    if duration_str is None:
+        return None
+    try:
+        duration = float(duration_str)
+    except (TypeError, ValueError):
+        return None
+    if duration <= 0:
+        return None
+    return (file_size * 8) / duration
+
+
+def should_encode_to_opus(info: dict, file_size: int) -> tuple[bool, str]:
+    """Return whether to encode and a human-readable reason."""
     streams = info.get("streams", [])
     has_video = any(s.get("codec_type") == "video" for s in streams)
+    if has_video:
+        return True, "Video detected."
 
-    if not has_video:
+    bitrate = container_bitrate_bps(info, file_size)
+    if bitrate is None:
+        return True, "Unknown duration."
+
+    if bitrate > ENCODE_BITRATE_THRESHOLD_BPS:
+        kbps = int(round(bitrate / 1000))
+        return True, f"High bitrate ({kbps} kbps)."
+
+    return False, ""
+
+
+def prepare_audio(input_path: Path) -> Path:
+    """Ensure audio is suitable for transcription upload.
+
+    Encodes to a .transcribe.ogg sidecar when the file has a video track or
+    container bitrate exceeds ENCODE_BITRATE_THRESHOLD_BPS. Reuses the sidecar
+    when it is newer than the source.
+    """
+    info = get_media_info(input_path)
+    file_size = input_path.stat().st_size
+    encode, reason = should_encode_to_opus(info, file_size)
+    if not encode:
         return input_path
 
-    # It's a video (or at least has a video stream), extract audio
     output_path = input_path.with_suffix(".transcribe.ogg")
 
-    # If the extracted file already exists and is newer than the source, reuse it
     if (
         output_path.exists()
         and output_path.stat().st_mtime > input_path.stat().st_mtime
     ):
-        print(f"Reusing existing extracted audio: {output_path.name}")
+        print(f"Reusing existing Opus audio: {output_path.name}")
         return output_path
 
-    print(f"Video detected. Extracting audio to: {output_path.name}...")
+    print(f"{reason} Encoding to Opus: {output_path.name}...")
 
-    # Extract mono audio, 16kHz, Opus at 32k (very efficient for speech)
     cmd = [
         "ffmpeg",
         "-y",
@@ -85,13 +119,13 @@ def prepare_audio(input_path: Path) -> Path:
         return output_path
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         print(
-            f"Warning: Failed to extract audio with ffmpeg ({e}). Uploading original file instead.",
+            f"Warning: Failed to encode audio with ffmpeg ({e}). Uploading original file instead.",
             file=sys.stderr,
         )
         return input_path
 
 
-def transcribe(input_path: Path) -> None:
+def transcribe(input_path: Path, language: str = "en") -> None:
     api_key = os.getenv("DEEPGRAM_KEY")
     if not api_key:
         print("Error: DEEPGRAM_KEY not set in environment", file=sys.stderr)
@@ -107,7 +141,9 @@ def transcribe(input_path: Path) -> None:
     if audio_path != input_path:
         print(f"Upload size: {audio_path.stat().st_size / 1024 / 1024:.1f} MB")
 
-    print("Sending to Deepgram (nova-3, diarization enabled)...\n")
+    model = "nova-3"
+
+    print(f"Sending to Deepgram ({model}, language={language}, diarization enabled)...\n")
 
     client = DeepgramClient(api_key=api_key)
 
@@ -116,7 +152,8 @@ def transcribe(input_path: Path) -> None:
 
     response = client.listen.v1.media.transcribe_file(
         request=audio_bytes,
-        model="nova-3",
+        model=model,
+        language=language,
         diarize=True,
         smart_format=True,
         punctuate=True,
@@ -158,13 +195,23 @@ def transcribe(input_path: Path) -> None:
 
     # Save transcript to file
     transcript_path = input_path.with_suffix(".txt")
-    transcript_path.write_text("".join(output_list), encoding="utf-8")
+    transcript_path.write_text(" ".join(output_list), encoding="utf-8")
     print(f"\n\nTranscript saved to: {transcript_path}")
 
 
 def main() -> None:
-    if len(sys.argv) > 1:
-        audio_path = Path(sys.argv[1])
+    parser = argparse.ArgumentParser(description="Transcribe audio using Deepgram.")
+    parser.add_argument("audio_file", nargs="?", help="Path to audio file")
+    parser.add_argument(
+        "--language",
+        "-l",
+        default="en",
+        help="BCP-47 language code (e.g. en, de, fr, es). Default: en",
+    )
+    args = parser.parse_args()
+
+    if args.audio_file:
+        audio_path = Path(args.audio_file)
     else:
         # Auto-detect: find the most recently modified .m4a in the project dir
         project_dir = Path(__file__).parent
@@ -173,7 +220,7 @@ def main() -> None:
         )
         if not m4a_files:
             print("No .m4a files found in the project directory.", file=sys.stderr)
-            print("Usage: uv run transcribe.py [audio_file.m4a]", file=sys.stderr)
+            print("Usage: uv run transcribe.py [audio_file] [--language LANG]", file=sys.stderr)
             sys.exit(1)
         audio_path = m4a_files[0]
 
@@ -181,7 +228,7 @@ def main() -> None:
         print(f"File not found: {audio_path}", file=sys.stderr)
         sys.exit(1)
 
-    transcribe(audio_path)
+    transcribe(audio_path, language=args.language)
 
 
 if __name__ == "__main__":
