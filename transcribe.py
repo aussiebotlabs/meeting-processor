@@ -143,7 +143,7 @@ def transcribe(input_path: Path, language: str = "en") -> None:
 
     model = "nova-3"
 
-    print(f"Sending to Deepgram ({model}, language={language}, diarization enabled)...\n")
+    print(f"Sending to Deepgram ({model}, language={language}, diarize_model=latest)...\n")
 
     client = DeepgramClient(api_key=api_key)
 
@@ -154,7 +154,7 @@ def transcribe(input_path: Path, language: str = "en") -> None:
         request=audio_bytes,
         model=model,
         language=language,
-        diarize=True,
+        diarize_model="latest",
         smart_format=True,
         punctuate=True,
         utterances=True,

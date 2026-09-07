@@ -253,3 +253,23 @@ def test_transcribe_saves_to_original_path(mock_getenv, mock_prepare, mock_dg, m
     
     # Verify extracted_path.txt does NOT exist
     assert not extracted_path.with_suffix(".txt").exists()
+
+
+@patch("transcribe.DeepgramClient")
+@patch("transcribe.prepare_audio")
+@patch("os.getenv")
+def test_transcribe_uses_latest_diarize_model(mock_getenv, mock_prepare, mock_dg, mock_path):
+    mock_getenv.return_value = "fake_key"
+    mock_prepare.return_value = mock_path
+    mock_response = MagicMock()
+    mock_response.results.utterances = [
+        MagicMock(speaker=0, transcript="Hello", start=0.0, end=1.0)
+    ]
+    mock_dg.return_value.listen.v1.media.transcribe_file.return_value = mock_response
+
+    transcribe(mock_path)
+
+    kwargs = mock_dg.return_value.listen.v1.media.transcribe_file.call_args.kwargs
+    assert kwargs["model"] == "nova-3"
+    assert kwargs["diarize_model"] == "latest"
+    assert "diarize" not in kwargs
