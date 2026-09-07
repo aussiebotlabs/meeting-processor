@@ -13,6 +13,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+ENCODE_BITRATE_THRESHOLD_BPS = 128_000
+
 
 def format_timestamp(seconds: float) -> str:
     minutes = int(seconds // 60)
@@ -39,22 +41,49 @@ def get_media_info(path: Path) -> dict:
         return {}
 
 
-def prepare_audio(input_path: Path) -> Path:
-    """Ensure audio is Opus-encoded before transcription.
+def container_bitrate_bps(info: dict, file_size: int) -> float | None:
+    """Compute container bitrate from file size and duration."""
+    duration_str = info.get("format", {}).get("duration")
+    if duration_str is None:
+        return None
+    try:
+        duration = float(duration_str)
+    except (TypeError, ValueError):
+        return None
+    if duration <= 0:
+        return None
+    return (file_size * 8) / duration
 
-    Encodes to a .transcribe.ogg sidecar unless the input is already a
-    pure Opus stream with no video track.  Reuses the sidecar when it is
-    newer than the source.
-    """
-    info = get_media_info(input_path)
+
+def should_encode_to_opus(info: dict, file_size: int) -> tuple[bool, str]:
+    """Return whether to encode and a human-readable reason."""
     streams = info.get("streams", [])
     has_video = any(s.get("codec_type") == "video" for s in streams)
-    audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
-    already_opus = bool(audio_streams) and all(
-        s.get("codec_name") == "opus" for s in audio_streams
-    )
+    if has_video:
+        return True, "Video detected."
 
-    if already_opus and not has_video:
+    bitrate = container_bitrate_bps(info, file_size)
+    if bitrate is None:
+        return True, "Unknown duration."
+
+    if bitrate > ENCODE_BITRATE_THRESHOLD_BPS:
+        kbps = int(round(bitrate / 1000))
+        return True, f"High bitrate ({kbps} kbps)."
+
+    return False, ""
+
+
+def prepare_audio(input_path: Path) -> Path:
+    """Ensure audio is suitable for transcription upload.
+
+    Encodes to a .transcribe.ogg sidecar when the file has a video track or
+    container bitrate exceeds ENCODE_BITRATE_THRESHOLD_BPS. Reuses the sidecar
+    when it is newer than the source.
+    """
+    info = get_media_info(input_path)
+    file_size = input_path.stat().st_size
+    encode, reason = should_encode_to_opus(info, file_size)
+    if not encode:
         return input_path
 
     output_path = input_path.with_suffix(".transcribe.ogg")
@@ -66,9 +95,6 @@ def prepare_audio(input_path: Path) -> Path:
         print(f"Reusing existing Opus audio: {output_path.name}")
         return output_path
 
-    reason = (
-        "Video detected." if has_video else f"Non-Opus audio ({input_path.suffix})."
-    )
     print(f"{reason} Encoding to Opus: {output_path.name}...")
 
     cmd = [

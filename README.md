@@ -65,7 +65,7 @@ Options:
 uv run transcribe.py [audio_file]
 ```
 
-Without an argument, the most recently modified `.m4a` in the project directory is used. Supports any audio or video file; video files are automatically stripped to audio via `ffmpeg`.
+Without an argument, the most recently modified `.m4a` in the project directory is used. Supports any audio or video file. Files with a video track, or with container bitrate above 128 kbps, are re-encoded to Opus before upload; lower-bitrate audio (e.g. voice-call M4A) is uploaded as-is.
 
 Output: `<input>.txt` — a diarized transcript with `[Speaker N][MM:SS.ss]` headers.
 
