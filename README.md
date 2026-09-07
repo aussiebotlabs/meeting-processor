@@ -1,6 +1,6 @@
 # Meeting Processor
 
-Records, transcribes, and diarizes meetings on macOS. Captures system audio and microphone simultaneously, mixes them into a clean mono file, sends it to Deepgram for speaker-diarized transcription, then uses GPT-4.1-mini to interactively identify speaker names.
+Records, transcribes, and diarizes meetings on macOS. Captures system audio and microphone simultaneously, mixes them into a clean mono file, sends it to Deepgram Nova-3 with the latest batch diarizer for speaker-diarized transcription, then uses GPT-4.1-mini to interactively identify speaker names.
 
 ## Pipeline
 
